@@ -5,7 +5,10 @@ import cv2
 import numpy as np
 
 PRESENT, BLOCKED, ABSENT, UNUSABLE = "present", "blocked", "absent", "unusable"
-DARK, BLUR_RATIO, VIEW_NCC, ITEM_NCC, MOTION = 20.0, 0.25, 0.5, 0.6, 4.0
+# ITEM_NCC was raised from 0.6 after a sweep on labelled synthetic clips: 0.8 caught the most removals on the
+# training split and accepted no moved or swapped item as returned. Re-check it on real footage.
+DARK, BLUR_RATIO, VIEW_NCC, ITEM_NCC, MOTION = 20.0, 0.25, 0.5, 0.8, 4.0
+JITTER = 2  # max whole-pixel camera shift compensated when measuring motion
 
 
 def ncc(a: np.ndarray, b: np.ndarray) -> float:
@@ -39,6 +42,24 @@ def _gray(frame: np.ndarray) -> np.ndarray:
 def _crop(gray: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = rect
     return gray[y : y + h, x : x + w]
+
+
+def _change(crop: np.ndarray, prev: np.ndarray) -> float:
+    """Smallest mean absolute difference over integer shifts of up to JITTER pixels, on the overlap."""
+    a = crop.astype(np.float32)
+    b = prev.astype(np.float32)
+    h, w = a.shape
+    if min(h, w) < 2 * JITTER + 1:
+        return float(np.abs(a - b).mean())
+    best = float("inf")
+    for dy in range(-JITTER, JITTER + 1):
+        for dx in range(-JITTER, JITTER + 1):
+            ar = slice(max(0, -dy), h - max(0, dy))
+            br = slice(max(0, dy), h - max(0, -dy))
+            ac = slice(max(0, -dx), w - max(0, dx))
+            bc = slice(max(0, dx), w - max(0, -dx))
+            best = min(best, float(np.abs(a[ar, ac] - b[br, bc]).mean()))
+    return best
 
 
 def _seen(run: list, value, ts: float, confirm: int) -> float | None:
@@ -103,7 +124,7 @@ class Watch:
     def _classify(self, i: int, it: Item, crop: np.ndarray, ts: float) -> list[dict]:
         if ncc(crop, self._refs[i]) >= ITEM_NCC:
             raw = PRESENT
-        elif np.abs(crop.astype(np.float32) - self._prev[i].astype(np.float32)).mean() > MOTION:
+        elif _change(crop, self._prev[i]) > MOTION:
             raw = BLOCKED
         else:
             raw = ABSENT

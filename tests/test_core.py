@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
+from theftprevention import core
 from theftprevention.core import BLOCKED, PRESENT, Item, Watch, ncc
 
 H, W = 480, 640
@@ -120,3 +121,61 @@ def test_rect_outside_frame_is_rejected():
 def test_ncc_of_flat_arrays_is_zero():
     flat = np.full((5, 5), 7, np.uint8)
     assert ncc(flat, flat) == 0.0
+
+
+def crop_of(frame: np.ndarray) -> np.ndarray:
+    return core._crop(core._gray(frame), RECT)
+
+
+def jittered_empty(rng: np.random.Generator, bg: np.ndarray, n: int) -> tuple[list[np.ndarray], list[tuple[int, int]]]:
+    frames, offsets = [], []
+    for _ in range(n):
+        dy, dx = (int(v) for v in rng.integers(-1, 2, size=2))
+        rolled = np.roll(bg, (dy, dx), axis=(0, 1)).astype(np.int16)
+        noise = rng.integers(-3, 4, size=bg.shape)
+        frames.append(np.clip(rolled + noise, 0, 255).astype(np.uint8))
+        offsets.append((dy, dx))
+    return frames, offsets
+
+
+def test_camera_jitter_on_empty_scene_still_emits_removal_candidate():
+    rng, bg, patch, watch = setup()
+    jitter, _ = jittered_empty(rng, bg, 40)
+    events = drive(watch, [frame_with(bg, patch)] * 10 + jitter)
+    assert "removal_candidate" in [e["type"] for e in events]
+
+
+def test_change_compensates_jitter_where_plain_difference_fails():
+    rng, bg, _, _ = setup()
+    jitter, offsets = jittered_empty(rng, bg, 40)
+    crops = [crop_of(f) for f in jitter]
+    bites = []
+    for k in range(1, len(crops)):
+        if offsets[k] == offsets[k - 1]:
+            continue
+        plain = float(np.abs(crops[k].astype(np.float32) - crops[k - 1].astype(np.float32)).mean())
+        if plain > core.MOTION:
+            bites.append(k)
+    assert bites, "no jittered pair exceeded MOTION under the plain difference"
+    k = bites[0]
+    assert core._change(crops[k], crops[k - 1]) < core.MOTION
+
+
+def test_occlusion_still_counts_as_movement():
+    rng, bg, patch, watch = setup()
+    patches = [texture(rng, RECT[3], RECT[2]) for _ in range(40)]
+    frames = [frame_with(bg, patch)] * 10 + [frame_with(bg, p) for p in patches]
+    crops = [crop_of(f) for f in frames[10:]]
+    for prev, cur in zip(crops, crops[1:]):
+        assert core._change(cur, prev) > core.MOTION
+    events = drive(watch, frames)
+    assert "removal_candidate" not in [e["type"] for e in events]
+
+
+def test_change_of_identical_crop_is_zero_and_of_2px_shift_is_small():
+    rng, bg, _, _ = setup()
+    gray = core._gray(bg)
+    crop = gray[200:280, 280:360]
+    shifted = gray[202:282, 282:362]
+    assert core._change(crop, crop) == 0.0
+    assert core._change(crop, shifted) < 1.0

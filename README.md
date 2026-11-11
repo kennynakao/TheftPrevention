@@ -28,9 +28,30 @@ Each watched area is in one of four states: `present`, `blocked` (something is m
 - Persistence: a state change is accepted only after two consecutive frames agree. An area that stays `absent` for `absent_s` seconds in a clear view gives a removal candidate.
 - Returns: the item visible again gives a `returned` event that resolves the candidate. An area that changed but does not match the reference gives a `possible_return` event, which stays open for a person to check.
 
+## Network cameras
+
+A source can be a USB camera index (for example `0`), a video file path, or a stream address. A stream address is RTSP, or an HTTP stream such as the one a phone camera app shows. Any address containing `://` is treated as live, except `file://`.
+
+Live sources are read by a background reader that keeps only the newest frame. Slow processing never works through a backlog of old frames, so delay does not build up. If a stream that was open drops, the reader waits 1 second, then doubles the wait after each failed attempt, up to 30 seconds. A stream that cannot be opened at the start raises an error at once. RTSP streams are read over TCP. Error messages raised by this module never include the user name or password from an address.
+
+```python
+from theftprevention.pipeline import Session
+
+session = Session("rtsp://user:password@192.168.1.64:554/Streaming/Channels/102", "media", print)
+```
+
+The address format depends on the camera; check the camera's manual or settings for its stream address. The live reader was tested with simulated capture objects and against a simulated network camera (a local HTTP stream), not with physical hardware.
+
 ## Tuning
 
-`theftprevention/core.py` holds five constants: `DARK`, `BLUR_RATIO`, `VIEW_NCC`, `ITEM_NCC` and `MOTION`. `absent_s` (default 3 seconds) is passed to `Watch` or `Session`.
+`theftprevention/core.py` holds six constants: `DARK`, `BLUR_RATIO`, `VIEW_NCC`, `ITEM_NCC`, `MOTION` and `JITTER`. `absent_s` (default 3 seconds) is passed to `Watch` or `Session`.
+
+Two of them were set from a test on 83 labelled synthetic clips that include a pixel of camera shake and sensor noise:
+
+- `JITTER` (2 pixels): the stillness test compares each crop with the previous one after allowing a small shift. Without it, camera shake alone made an empty area look like movement, and only 7 of 48 scripted removals were reported.
+- `ITEM_NCC` (0.8): how closely a crop must match the reference to count as present. At 0.8 the same test reported 41 of 48 removals, raised no removal alarm on 35 clips without one, and never accepted a moved or swapped item as returned.
+
+Those clips are synthetic composites. Re-check both values on your own footage.
 
 ## Privacy
 
