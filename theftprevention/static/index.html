@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Belongings watch demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; color: #1b1b1b; background: #fafafa; }
+  button, input[type=file] { font: inherit; margin: 4px 4px 4px 0; }
+  button { padding: 6px 10px; cursor: pointer; }
+  .hint, .msg { color: #555; margin: 6px 0; }
+  #banner { background: #fff1c2; border: 1px solid #d9a400; padding: 8px; margin: 8px 0; }
+  .stage { position: relative; display: inline-block; max-width: 100%; background: #222; }
+  #stream { display: block; max-width: 100%; height: auto; }
+  #overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  .event { border: 1px solid #ccc; background: #fff; border-radius: 6px; padding: 10px; margin: 8px 0; }
+  .text.dimmed { opacity: 0.55; }
+  .badge { background: #2d6a4f; color: #fff; border-radius: 4px; padding: 1px 6px; font-size: 0.85em; }
+  .followup { border-left: 3px solid #999; padding-left: 8px; margin-top: 8px; }
+  .meta { color: #555; font-size: 0.9em; }
+  video { display: block; max-width: 100%; margin: 6px 0; }
+</style>
+</head>
+<body>
+<h1>Belongings watch demo</h1>
+<p class="hint">Local demo. Removal candidates are observations for a person to review. Nothing here concludes theft.</p>
+
+<div>
+  <button id="webcam">Use webcam</button>
+  <input type="file" id="file" accept="video/*" aria-label="Upload a recording">
+</div>
+<p class="hint">Frame the items, keep them in view, then arm. The frame at arming is the reference.</p>
+<p class="msg" id="msg"></p>
+
+<div class="stage">
+  <img id="stream" src="/api/stream" alt="Camera stream">
+  <canvas id="overlay"></canvas>
+</div>
+<div>
+  <button id="clear">Clear</button>
+  <button id="arm">Arm</button>
+  <button id="disarm">Disarm</button>
+</div>
+
+<div id="banner" hidden>Camera view is dark, blurred or shifted. Monitoring is paused until it recovers.</div>
+<h2>Watched items</h2>
+<ul id="items"></ul>
+
+<h2>Events</h2>
+<div id="events"></div>
+
+<script>
+const STATUSES = ["needs_review", "expected_removal", "returned", "confirmed_stolen"];
+const FOLLOWUPS = ["returned", "possible_return"];
+const $ = (id) => document.getElementById(id);
+const img = $("stream");
+const canvas = $("overlay");
+const ctx = canvas.getContext("2d");
+const videos = {};
+let rects = [];
+let drag = null;
+let shownSignature = "";
+
+const words = (s) => s.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+
+function node(tag, text, attrs) {
+  const n = document.createElement(tag);
+  if (text !== undefined) n.textContent = text;
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  return n;
+}
+
+function say(text) {
+  $("msg").textContent = text;
+}
+
+async function call(method, path, body) {
+  const opts = { method };
+  if (body instanceof FormData) opts.body = body;
+  else if (body !== undefined) Object.assign(opts, { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json()).detail ?? `Request failed: HTTP ${r.status}`);
+  return r.json();
+}
+
+function attempt(fn) {
+  return async (e) => {
+    try {
+      await fn(e);
+    } catch (err) {
+      say(err.message);
+    }
+  };
+}
+
+function clearRects() {
+  rects = [];
+  draw();
+}
+
+function restartStream() {
+  img.src = "/api/stream?t=" + Date.now();
+}
+
+function fit() {
+  canvas.width = img.clientWidth;
+  canvas.height = img.clientHeight;
+  draw();
+}
+new ResizeObserver(fit).observe(img);
+
+function draw(preview) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "14px system-ui, sans-serif";
+  const all = preview ? rects.concat([preview]) : rects;
+  for (const r of all) {
+    const [x, y, w, h] = r.rect || r;
+    const px = [x * canvas.width, y * canvas.height, w * canvas.width, h * canvas.height];
+    ctx.strokeStyle = "#ffd60a";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(...px);
+    if (r.name) ctx.fillText(r.name, px[0] + 4, px[1] + 16);
+  }
+}
+
+function point(e) {
+  const b = img.getBoundingClientRect();
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  return [clamp((e.clientX - b.left) / b.width), clamp((e.clientY - b.top) / b.height)];
+}
+
+function normalRect(a, b) {
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1])];
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (!img.naturalWidth || rects.length >= 3) return;
+  canvas.setPointerCapture(e.pointerId);
+  drag = point(e);
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (drag) draw({ rect: normalRect(drag, point(e)) });
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  if (!drag) return;
+  const rect = normalRect(drag, point(e));
+  drag = null;
+  draw();
+  if (rect[2] < 0.02 || rect[3] < 0.02) return;
+  const name = (prompt("Name this item") || "").trim();
+  if (!name) return;
+  rects.push({ name, rect });
+  draw();
+});
+
+$("clear").onclick = clearRects;
+
+$("arm").onclick = attempt(async () => {
+  await call("POST", "/api/arm", { items: rects });
+  clearRects();
+  say("Armed.");
+});
+
+$("disarm").onclick = attempt(async () => {
+  await call("POST", "/api/disarm");
+  clearRects();
+  say("Disarmed.");
+});
+
+$("webcam").onclick = attempt(async () => {
+  await call("POST", "/api/webcam?index=0");
+  restartStream();
+  say("Webcam started. Draw the items, then arm.");
+});
+
+$("file").onchange = attempt(async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  say("Uploading...");
+  await call("POST", "/api/upload", form);
+  restartStream();
+  say("Playing the recording. Draw the items on the first frame, then arm.");
+});
+
+function clock(ts) {
+  if (ts > 1e9) return new Date(ts * 1000).toLocaleTimeString();
+  const s = Math.floor(ts);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function clipNode(ev) {
+  if (!ev.clip) return node("p", "No clip saved.", { class: "meta" });
+  videos[ev.clip] ??= node("video", undefined, { controls: "", preload: "metadata", src: "/media/" + ev.clip });
+  return videos[ev.clip];
+}
+
+function removalNode(ev, followups) {
+  const returned = followups.some((f) => f.type === "returned");
+  const box = node("div", undefined, { class: "event" });
+  const text = node("div", undefined, { class: "text" + (returned ? " dimmed" : "") });
+  text.append(node("strong", words(ev.type)));
+  if (returned) text.append(" ", node("span", "Returned", { class: "badge" }));
+  text.append(node("div", `${ev.item || ""} at ${clock(ev.ts)}`, { class: "meta" }), node("p", ev.reason));
+  box.append(text, clipNode(ev), node("p", `Review: ${words(ev.review)}`, { class: "meta" }));
+  const reviews = node("div");
+  for (const status of STATUSES) {
+    const b = node("button", words(status));
+    b.onclick = attempt(async () => {
+      await call("POST", `/api/events/${ev.id}/review`, { status });
+      poll();
+    });
+    reviews.append(b);
+  }
+  box.append(reviews);
+  for (const f of followups) {
+    const text = f.type === "returned" ? `Returned after ${Math.round(f.detail.away_s)} s` : `Possible return after ${Math.round(f.detail.away_s)} s, check the clip`;
+    const sub = node("div", undefined, { class: "followup" });
+    sub.append(node("strong", text), node("div", clock(f.ts), { class: "meta" }), clipNode(f));
+    box.append(sub);
+  }
+  return box;
+}
+
+function renderEvents(events) {
+  const removals = events.filter((e) => !FOLLOWUPS.includes(e.type));
+  $("events").replaceChildren(...removals.map((ev) => removalNode(ev, events.filter((f) => FOLLOWUPS.includes(f.type) && f.detail.removal_id === ev.id).sort((a, b) => a.ts - b.ts))));
+}
+
+async function poll() {
+  const events = await call("GET", "/api/events");
+  const signature = JSON.stringify(events);
+  if (signature !== shownSignature) {
+    shownSignature = signature;
+    renderEvents(events);
+  }
+  const status = await call("GET", "/api/status");
+  $("banner").hidden = status.view_ok;
+  if (status.ended) say("The source has ended. Upload a recording or use the webcam.");
+  $("items").replaceChildren(...status.items.map((it) => node("li", `${it.name}: ${it.state}`)));
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
