@@ -44,7 +44,9 @@ The address format depends on the camera; check the camera's manual or settings 
 
 ## Tuning
 
-`theftprevention/core.py` holds six constants: `DARK`, `BLUR_RATIO`, `VIEW_NCC`, `ITEM_NCC`, `MOTION` and `JITTER`. `absent_s` (default 3 seconds) is passed to `Watch` or `Session`.
+`theftprevention/core.py` holds eight constants: `DARK`, `BLUR_RATIO`, `VIEW_NCC`, `ITEM_NCC`, `MOTION`, `JITTER`, `VIEW_GRID` and `FLAT`. `absent_s` (default 3 seconds) is passed to `Watch` or `Session`.
+
+The view check (is the camera covered or moved?) compares the frame with the reference tile by tile on a `VIEW_GRID` by `VIEW_GRID` grid (4 by 4) and takes the median, so a person covering part of the frame does not pause monitoring. Tiles that are blank in the reference (letterbox bars, a plain wall, a blown-out window) are skipped; `FLAT` (2.0 grey levels of standard deviation) decides what counts as blank. It assumes sensor noise below about 7 grey levels, so check it on night footage. On 362 held-out synthetic clips the check still paused monitoring wrongly in 27, mostly while a person covered a large part of the frame.
 
 Two of them were set from a test on 83 labelled synthetic clips that include a pixel of camera shake and sensor noise:
 

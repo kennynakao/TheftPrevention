@@ -179,3 +179,97 @@ def test_change_of_identical_crop_is_zero_and_of_2px_shift_is_small():
     shifted = gray[202:282, 282:362]
     assert core._change(crop, crop) == 0.0
     assert core._change(crop, shifted) < 1.0
+
+
+def high_contrast_patch(rng: np.random.Generator, h: int, w: int, cell: int = 8) -> np.ndarray:
+    cells = rng.integers(0, 2, size=(h // cell, w // cell)) * 255
+    block = np.repeat(np.repeat(cells, cell, axis=0), cell, axis=1).astype(np.uint8)
+    return cv2.cvtColor(block, cv2.COLOR_GRAY2BGR)
+
+
+def test_large_occluder_does_not_fail_view():
+    rng, bg, patch, watch = setup()
+    base = frame_with(bg, patch)
+    frames = []
+    for _ in range(12):
+        frame = base.copy()
+        frame[: H // 3] = high_contrast_patch(rng, H // 3, W)  # top third, clear of RECT (rows 200-280)
+        frames.append(frame)
+    gray, ref = core._gray(frames[0]), core._gray(base)
+    assert core.ncc(gray, ref) < core.VIEW_NCC
+    assert core._view_match(gray, ref, watch._tiles) >= core.VIEW_NCC
+    events = drive(watch, frames)
+    assert "view_unusable" not in [e["type"] for e in events]
+    assert watch.view_ok is True
+
+
+def test_shifted_camera_still_fails_view():
+    _, bg, patch, watch = setup()
+    shifted = np.roll(frame_with(bg, patch), 40, axis=1)
+    events = drive(watch, [shifted] * 10)
+    assert [e["type"] for e in events] == ["view_unusable"]
+    assert watch.view_ok is False
+
+
+def test_fully_covered_frame_still_fails_view():
+    rng, bg, patch, watch = setup()
+    covered = texture(rng, H, W)
+    events = drive(watch, [covered] * 10)
+    assert [e["type"] for e in events] == ["view_unusable"]
+    assert watch.view_ok is False
+
+
+def noisy(rng: np.random.Generator, frame: np.ndarray, sigma: float = 3.0) -> np.ndarray:
+    return np.clip(frame.astype(np.float64) + rng.normal(0.0, sigma, frame.shape), 0, 255).astype(np.uint8)
+
+
+def letterboxed(rng: np.random.Generator) -> np.ndarray:
+    frame = texture(rng, H, W)
+    frame[: H // 4 + 8] = 0  # 8 px past the tile edge so the blur leaves rows 0 and 3 truly flat
+    frame[3 * H // 4 - 8 :] = 0
+    return frame
+
+
+def test_letterboxed_reference_keeps_view_under_noise():
+    rng = np.random.default_rng(1)
+    base = letterboxed(rng)
+    watch = Watch([Item("bag", RECT)], base, 0.0)
+    assert len(watch._tiles) == 8
+    events = drive(watch, [noisy(rng, base) for _ in range(6)])
+    assert watch.view_ok is True
+    assert "view_unusable" not in [e["type"] for e in events]
+
+
+def test_mostly_flat_reference_keeps_view_under_noise():
+    rng = np.random.default_rng(2)
+    base = np.full((H, W, 3), 128, np.uint8)
+    base[H // 4 : 3 * H // 4, W // 4 : 3 * W // 4] = texture(rng, H // 2, W // 2)
+    watch = Watch([Item("bag", RECT)], base, 0.0)
+    assert len(watch._tiles) == 4
+    events = drive(watch, [noisy(rng, base) for _ in range(6)])
+    assert watch.view_ok is True
+    assert "view_unusable" not in [e["type"] for e in events]
+
+
+def test_covered_lens_with_partly_flat_reference_fails_view():
+    rng = np.random.default_rng(3)
+    base = letterboxed(rng)
+    watch = Watch([Item("bag", RECT)], base, 0.0)
+    covered = np.full((H, W, 3), 90, np.uint8)
+    events = drive(watch, [noisy(rng, covered) for _ in range(6)])
+    assert watch.view_ok is False
+    assert [e["type"] for e in events].count("view_unusable") == 1
+
+
+def test_reference_with_fewer_than_four_textured_tiles_uses_whole_frame():
+    rng = np.random.default_rng(4)
+    base = np.full((H, W, 3), 128, np.uint8)
+    base[: H // 4, : W // 4] = texture(rng, H // 4, W // 4)
+    watch = Watch([Item("bag", RECT)], base, 0.0)
+    assert len(watch._tiles) < core.VIEW_GRID
+    frame = noisy(rng, base)
+    gray, ref = core._gray(frame), core._gray(base)
+    assert core._view_match(gray, ref, watch._tiles) == core.ncc(gray, ref)
+    events = drive(watch, [noisy(rng, base) for _ in range(6)])
+    assert watch.view_ok is True
+    assert "view_unusable" not in [e["type"] for e in events]

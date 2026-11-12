@@ -9,6 +9,8 @@ PRESENT, BLOCKED, ABSENT, UNUSABLE = "present", "blocked", "absent", "unusable"
 # training split and accepted no moved or swapped item as returned. Re-check it on real footage.
 DARK, BLUR_RATIO, VIEW_NCC, ITEM_NCC, MOTION = 20.0, 0.25, 0.5, 0.8, 4.0
 JITTER = 2  # max whole-pixel camera shift compensated when measuring motion
+VIEW_GRID = 4  # the view check compares a VIEW_GRID by VIEW_GRID grid of tiles
+FLAT = 2.0  # a reference tile whose grey standard deviation is at or below this has no texture to compare
 
 
 def ncc(a: np.ndarray, b: np.ndarray) -> float:
@@ -21,6 +23,13 @@ def ncc(a: np.ndarray, b: np.ndarray) -> float:
     if denom < 1e-6:
         return 0.0
     return float(np.dot(a, b)) / denom
+
+
+def _view_match(gray: np.ndarray, ref: np.ndarray, tiles: list) -> float:
+    """Median of the per-tile ncc over the given tiles, skipping flat reference tiles; whole-frame ncc if fewer than VIEW_GRID remain."""
+    if len(tiles) < VIEW_GRID:
+        return ncc(gray, ref)
+    return float(np.median([ncc(gray[t], ref[t]) for t in tiles]))
 
 
 @dataclass
@@ -82,6 +91,9 @@ class Watch:
         self.view_ok = True
         self._ref = _gray(frame)
         self._ref_sharp = cv2.Laplacian(self._ref, cv2.CV_64F).var()
+        h, w = self._ref.shape
+        grid = [(slice(i * h // VIEW_GRID, (i + 1) * h // VIEW_GRID), slice(j * w // VIEW_GRID, (j + 1) * w // VIEW_GRID)) for i in range(VIEW_GRID) for j in range(VIEW_GRID)]
+        self._tiles = [t for t in grid if self._ref[t].std() > FLAT]
         self._refs = [_crop(self._ref, it.rect) for it in items]
         if any(ref.size == 0 for ref in self._refs):
             raise ValueError("rect outside frame")
@@ -100,7 +112,7 @@ class Watch:
         good = bool(
             gray.mean() >= DARK
             and cv2.Laplacian(gray, cv2.CV_64F).var() >= BLUR_RATIO * self._ref_sharp
-            and ncc(gray, self._ref) >= VIEW_NCC
+            and _view_match(gray, self._ref, self._tiles) >= VIEW_NCC
         )
         start = _seen(self._view_run, good, ts, self.confirm)
         if start is not None and good != self.view_ok:
